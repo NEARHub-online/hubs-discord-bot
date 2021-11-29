@@ -3,11 +3,6 @@ const dotenv = require("dotenv");
 dotenv.config({ path: ".env" });
 dotenv.config({ path: ".env.defaults" });
 
-if (process.env.SENTRY_DSN) {
-    const Sentry = require("@sentry/node");
-    Sentry.init({ dsn: process.env.SENTRY_DSN });
-}
-
 const moment = require('moment-timezone');
 const discord = require('discord.js');
 const schedule = require('node-schedule');
@@ -24,17 +19,10 @@ moment.tz.setDefault(process.env.TIMEZONE);
 moment.locale(process.env.LOCALE);
 
 const VERBOSE = (process.env.VERBOSE === "true");
-
-function logger(kind, msg, data) {
-    if ((kind !== "push" && kind !== "receive" && msg !== "dropping outdated message") || VERBOSE) {
-        console.log("Phoenix:", kind, msg, data);
-    }
-}
-
 const HOSTNAMES = process.env.HUBS_HOSTS.split(",");
 const MEDIA_DEDUPLICATE_MS = 60 * 60 * 1000; // 1 hour
 const IMAGE_URL_RE = /\.(png)|(gif)|(jpg)|(jpeg)$/;
-const ACTIVE_ICON = "🔸";
+const ACTIVE_ICON = "ðŸ”¸";
 const ACTIVE_WEBHOOKS = {}; // { discordChId: webhook }
 const DISABLED_EVENTS = [ // only bother to disable processing on relatively high-volume events
     "TYPING_START",
@@ -59,16 +47,15 @@ if (statsdHost) {
 // and from a channel topic update, or from two channel topic updates in quick succession.
 class DiscordEventQueue {
 
-    constructor(id = "global") {
-        this.id = id;
+    constructor() {
         this.size = 0;
         this.curr = Promise.resolve();
         this._onSizeChanged();
     }
 
     _onSizeChanged() {
-        if (this.size >= 5 || VERBOSE) {
-            console.log(`Event queue [${this.id}] size: ${this.size}`);
+        if (statsdClient != null) {
+            statsdClient.send("discord.queuesize", this.size, "g");
         }
     }
 
@@ -76,52 +63,15 @@ class DiscordEventQueue {
     enqueue(fn) {
         this.size += 1;
         this._onSizeChanged();
-        return (this.curr = this.curr
-            .then(_ => fn())
-            .catch(e => {
-                console.error(`Event queue [${this.id}] exception: ${ts(e.stack)}`);
-            })
-            .finally(() => {
-                this.size -= 1;
-                this._onSizeChanged();
-            }));
-    }
-
-}
-
-// Creates global an per channel event queues
-class DiscordEventQueueManager {
-    constructor() {
-        this.globalQueue = new DiscordEventQueue();
-        this.channelQueue = {};
-    }
-
-    enqueue(task, channelId = null) {
-        let queue = this.globalQueue;
-        if (channelId) {
-            if (this.channelQueue[channelId]) {
-                queue = this.channelQueue[channelId];
-            } else {
-                queue = this.channelQueue[channelId] = new DiscordEventQueue(channelId);
-            }
-        }
-        const ret = queue.enqueue(task).then(() => {
-            this._queueUpdated();
+        return this.curr = this.curr.then(_ => fn()).catch(e => console.error(ts(e.stack))).finally(() => {
+            this.size -= 1;
+            this._onSizeChanged();
         });
-        this._queueUpdated();
-
-        return ret;
     }
 
-    _queueUpdated() {
-        if (statsdClient != null) {
-            const size = this.globalQueue.size + Object.values(this.channelQueue).reduce((acc, item) => acc + item.size, 0);
-            statsdClient.send("discord.queuesize", size, "g");
-        }
-    }
 }
 
-const q = new DiscordEventQueueManager();
+const q = new DiscordEventQueue();
 
 // Prepends a timestamp to a string.
 function ts(str) {
@@ -267,144 +217,120 @@ async function establishBridging(hubState, bridges) {
 
     const lastPresenceMessages = {}; // { discordCh: message object }
     presenceRollups.on('new', ({ kind, users, fresh }) => {
-        try {
-            if (statsdClient != null) {
-                statsdClient.send("reticulum.presencechanges", 1, "c");
+        if (statsdClient != null) {
+            statsdClient.send("reticulum.presencechanges", 1, "c");
+        }
+        for (const discordCh of bridges.getChannels(hubState.id).values()) {
+            if (VERBOSE) {
+                console.debug(ts(`Relaying presence ${kind} in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
             }
-            for (const discordCh of bridges.getChannels(hubState.id).values()) {
-                if (VERBOSE) {
-                    console.debug(ts(`Relaying presence ${kind} in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
-                }
-                if (kind === "arrive") {
-                    const msg = fresh ?
-                        `${formatList(users)} joined the Nearhub room. Join them: ${hubState.shortUrl}` :
-                        `${formatList(users)} joined the Nearhub room.`;
-                    lastPresenceMessages[discordCh.id] = discordCh.send(msg);
-                } else if (kind === "depart") {
-                    const msg = `${formatList(users)} left the Hubs room.`;
-                    lastPresenceMessages[discordCh.id] = discordCh.send(msg);
-                } else if (kind === "rename") {
-                    lastPresenceMessages[discordCh.id] = discordCh.send(formatRename(users[0]));
-                }
+            if (kind === "arrive") {
+                const msg = fresh ?
+                    `${formatList(users)} joined the Nearhub room. Join them: ${hubState.shortUrl}` :
+                    `${formatList(users)} joined the Nearhub room.`;
+                lastPresenceMessages[discordCh.id] = discordCh.send(msg);
+            } else if (kind === "depart") {
+                const msg = `${formatList(users)} left the Nearhub room.`;
+                lastPresenceMessages[discordCh.id] = discordCh.send(msg);
+            } else if (kind === "rename") {
+                lastPresenceMessages[discordCh.id] = discordCh.send(formatRename(users[0]));
             }
-        } catch (e) {
-            console.error(ts(`Error relaying presence ${kind} in ${hubState.id}.`), e);
         }
     });
     presenceRollups.on('update', ({ kind, users, fresh }) => {
-        try {
-            if (statsdClient != null) {
-                statsdClient.send("reticulum.presencechanges", 1, "c");
+        if (statsdClient != null) {
+            statsdClient.send("reticulum.presencechanges", 1, "c");
+        }
+        for (const discordCh of bridges.getChannels(hubState.id).values()) {
+            if (VERBOSE) {
+                console.debug(ts(`Relaying presence ${kind} in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
             }
-            for (const discordCh of bridges.getChannels(hubState.id).values()) {
-                if (VERBOSE) {
-                    console.debug(ts(`Relaying presence ${kind} in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
-                }
-                if (kind === "arrive") {
-                    const msg = fresh ?
-                        `${formatList(users)} joined the Nearhub room. Join them: ${hubState.shortUrl}` :
-                        `${formatList(users)} joined the Nearhub room.`;
-                    lastPresenceMessages[discordCh.id] = lastPresenceMessages[discordCh.id].then(prev => prev.edit(msg));
-                } else if (kind === "depart") {
-                    const msg = `${formatList(users)} left the Nearhub room.`;
-                    lastPresenceMessages[discordCh.id] = lastPresenceMessages[discordCh.id].then(prev => prev.edit(msg));
-                } else if (kind === "rename") {
-                    lastPresenceMessages[discordCh.id] = lastPresenceMessages[discordCh.id].then(prev => prev.edit(formatRename(users[0])));
-                }
+            if (kind === "arrive") {
+                const msg = fresh ?
+                    `${formatList(users)} joined the Nearhub room. Join them: ${hubState.shortUrl}` :
+                    `${formatList(users)} joined the Nearhub room.`;
+                lastPresenceMessages[discordCh.id] = lastPresenceMessages[discordCh.id].then(prev => prev.edit(msg));
+            } else if (kind === "depart") {
+                const msg = `${formatList(users)} left the Hubs room.`;
+                lastPresenceMessages[discordCh.id] = lastPresenceMessages[discordCh.id].then(prev => prev.edit(msg));
+            } else if (kind === "rename") {
+                lastPresenceMessages[discordCh.id] = lastPresenceMessages[discordCh.id].then(prev => prev.edit(formatRename(users[0])));
             }
-        } catch (e) {
-            console.error(ts(`Error relaying presence update ${kind} in ${hubState.id}.`), e);
         }
     });
 
     reticulumCh.on('rescene', (timestamp, id, whom, scene) => {
-        try {
-            for (const discordCh of bridges.getChannels(hubState.id).values()) {
-                if (VERBOSE) {
-                    console.debug(ts(`Relaying scene change by ${whom} (${id}) in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
-                }
-                if (scene) {
-                    discordCh.send(`${whom} changed the scene in ${hubState.shortUrl} to ${scene.name}.`);
-                } else {
-                    // the API response has a totally convoluted structure we could use to dig up the scene URL in theory,
-                    // but it doesn't seem worth reproducing the dozen lines of hubs code that does this here
-                    discordCh.send(`${whom} changed ${hubState.shortUrl} to a new scene.`);
-                }
+        for (const discordCh of bridges.getChannels(hubState.id).values()) {
+            if (VERBOSE) {
+                console.debug(ts(`Relaying scene change by ${whom} (${id}) in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
             }
-        } catch (e) {
-            console.error(ts(`Error relaying presence scene change by ${whom} (${id}) in ${hubState.id}.`), e);
+            if (scene) {
+                discordCh.send(`${whom} changed the scene in ${hubState.shortUrl} to ${scene.name}.`);
+            } else {
+                // the API response has a totally convoluted structure we could use to dig up the scene URL in theory,
+                // but it doesn't seem worth reproducing the dozen lines of hubs code that does this here
+                discordCh.send(`${whom} changed ${hubState.shortUrl} to a new scene.`);
+            }
         }
     });
     reticulumCh.on('renamehub', (timestamp, id, whom, name, slug) => {
-        try {
-            for (const discordCh of bridges.getChannels(hubState.id).values()) {
-                hubState.name = name;
-                hubState.slug = slug;
-                if (VERBOSE) {
-                    console.debug(ts(`Relaying name change by ${whom} (${id}) in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
-                }
-                discordCh.send(`${whom} renamed the Nearhub room at ${hubState.shortUrl} to ${hubState.name}.`);
+        for (const discordCh of bridges.getChannels(hubState.id).values()) {
+            hubState.name = name;
+            hubState.slug = slug;
+            if (VERBOSE) {
+                console.debug(ts(`Relaying name change by ${whom} (${id}) in ${hubState.id} to ${formatDiscordCh(discordCh)}.`));
             }
-        } catch (e) {
-            console.error(ts(`Error relaying name change by ${whom} (${id}) in ${hubState.id}.`), e);
+            discordCh.send(`${whom} renamed the Nearhub room at ${hubState.shortUrl} to ${hubState.name}.`);
         }
     });
 
     const mediaBroadcasts = {}; // { url: timestamp }
     reticulumCh.on("message", (timestamp, id, whom, type, body) => {
-        try {
-            if (statsdClient != null) {
-                statsdClient.send("reticulum.contentmsgs", 1, "c");
-            }
-            if (type === "media") {
-                // we really like to deduplicate media broadcasts of the same object in short succession,
-                // mostly because of the case where people are repositioning pinned media, but also because
-                // sometimes people will want to clone a bunch of one thing and pin them all in one go
-                const lastBroadcast = mediaBroadcasts[body.src];
-                if (lastBroadcast != null) {
-                    const elapsedMs = timestamp - lastBroadcast;
-                    if (elapsedMs <= MEDIA_DEDUPLICATE_MS) {
-                        if (VERBOSE) {
-                            console.debug(ts(`Declining to rebroadcast ${body.src} only ${(elapsedMs / 1000).toFixed(0)} second(s) after previous broadcast.`));
-                        }
-                        return;
-                    }
-                } else {
-                    mediaBroadcasts[body.src] = timestamp;
-                }
-            }
-            for (const discordCh of bridges.getChannels(hubState.id).values()) {
-                const webhook = ACTIVE_WEBHOOKS[discordCh.id]; // note that this may change over the lifetime of the bridge
-                if (webhook == null) {
+        if (statsdClient != null) {
+            statsdClient.send("reticulum.contentmsgs", 1, "c");
+        }
+        if (type === "media") {
+            // we really like to deduplicate media broadcasts of the same object in short succession,
+            // mostly because of the case where people are repositioning pinned media, but also because
+            // sometimes people will want to clone a bunch of one thing and pin them all in one go
+            const lastBroadcast = mediaBroadcasts[body.src];
+            if (lastBroadcast != null) {
+                const elapsedMs = timestamp - lastBroadcast;
+                if (elapsedMs <= MEDIA_DEDUPLICATE_MS) {
                     if (VERBOSE) {
-                        console.debug(`Ignoring message of type ${type} in ${formatDiscordCh(discordCh)} because no webhook is associated.`);
+                        console.debug(ts(`Declining to rebroadcast ${body.src} only ${(elapsedMs / 1000).toFixed(0)} second(s) after previous broadcast.`));
                     }
                     return;
                 }
-                if (VERBOSE) {
-                    const msg = ts(`Relaying message of type ${type} from ${whom} (${id}) via ${hubState.id} to ${formatDiscordCh(discordCh)}: %j`);
-                    console.debug(msg, body);
-                }
-                if (type === "chat") {
-                    webhook.send(body, { username: whom });
-                } else if (type === "media") {
-                    webhook.send(body.src, { username: whom });
-                } else if (type === "photo" || type == "video") {
-                    // we like to just broadcast all camera photos and videos, without waiting for anyone to pin them
-                    webhook.send(body.src, { username: whom });
-                }
+            } else {
+                mediaBroadcasts[body.src] = timestamp;
             }
-        } catch (e) {
-            console.error(ts(`Error relaying message of type ${type} from ${whom} (${id}) via ${hubState.id}.`), e);
+        }
+        for (const discordCh of bridges.getChannels(hubState.id).values()) {
+            const webhook = ACTIVE_WEBHOOKS[discordCh.id]; // note that this may change over the lifetime of the bridge
+            if (webhook == null) {
+                if (VERBOSE) {
+                    console.debug(`Ignoring message of type ${type} in ${formatDiscordCh(discordCh)} because no webhook is associated.`);
+                }
+                return;
+            }
+            if (VERBOSE) {
+                const msg = ts(`Relaying message of type ${type} from ${whom} (${id}) via ${hubState.id} to ${formatDiscordCh(discordCh)}: %j`);
+                console.debug(msg, body);
+            }
+            if (type === "chat") {
+                webhook.send(body, { username: whom });
+            } else if (type === "media") {
+                webhook.send(body.src, { username: whom });
+            } else if (type === "photo" || type == "video") {
+                // we like to just broadcast all camera photos and videos, without waiting for anyone to pin them
+                webhook.send(body.src, { username: whom });
+            }
         }
     });
 
     reticulumCh.on('sync', async() => {
-        try {
-            await updateChannelPresenceIcons(bridges.getChannels(hubState.id).values(), reticulumCh.getUserCount() > 0);
-        } catch (e) {
-            console.error(ts(`Error updating channel presence icons in ${hubState.id}`), e);
-        }
+        await updateChannelPresenceIcons(bridges.getChannels(hubState.id).values(), reticulumCh.getUserCount() > 0);
     });
 
     // also get it right for the initial state
@@ -442,18 +368,7 @@ function scheduleSummaryPosting(bridges) {
 async function connectToHub(reticulumClient, discordChannels, host, hubId) {
     const reticulumCh = reticulumClient.channelForHub(hubId, serializeProfile("Nearhub Bot", discordChannels));
     reticulumCh.on("connect", (timestamp, id) => { console.info(ts(`Connected to Nearhub room ${hubId} with session ID ${id}.`)); });
-
-    let resp;
-    try {
-        resp = (await reticulumCh.connect()).hubs[0];
-    } catch (e) {
-        if (e.reason && (e.reason === "closed" || e.reason === "join_denied" || e.reason === "not_found")) {
-            await reticulumCh.close();
-        }
-
-        throw e;
-    }
-
+    const resp = (await reticulumCh.connect()).hubs[0];
     const stats = new HubStats();
     const presenceRollups = new PresenceRollups();
     let nRoomOccupants = 0;
@@ -529,7 +444,7 @@ async function start() {
     console.info(ts(`Connected to Discord (shard ID: ${shardId}/${shardCount})...`));
 
     const reticulumHost = process.env.RETICULUM_HOST;
-    const reticulumClient = new ReticulumClient(reticulumHost, logger);
+    const reticulumClient = new ReticulumClient(reticulumHost);
     await reticulumClient.connect();
     console.info(ts(`Connected to Reticulum @ ${reticulumHost}.`));
 
@@ -542,7 +457,7 @@ async function start() {
 
     // one-time scan through all channels to look for existing bridges
     console.info(ts(`Scanning channel topics for Nearhub hosts: ${HOSTNAMES.join(", ")}`)); {
-        const textChannels = discordClient.channels.cache.array().filter(ch => ch.type === "text");
+        const textChannels = Array.from(discordClient.channels.filter(ch => ch.type === "text").values());
         const candidateBridges = findBridges(topicManager, textChannels);
 
         for (const [key, channels] of candidateBridges.entries()) {
@@ -556,7 +471,7 @@ async function start() {
                 }
                 await establishBridging(hubState, bridges);
             } catch (e) {
-                console.error(ts(`Error bridging Hubs room ${hubId}:`), e);
+                console.error(ts(`Error bridging Nearhub room ${hubId}:`), e);
             }
         }
         const { nChannels, nGuilds, nRooms } = getBridgeStats(bridges);
@@ -569,11 +484,10 @@ async function start() {
                 const perms = discordCh.permissionsFor(discordClient.user);
                 if (perms.has([
                         discord.Permissions.FLAGS.MANAGE_MESSAGES,
-                        discord.Permissions.FLAGS.VIEW_CHANNEL,
                         discord.Permissions.FLAGS.READ_MESSAGES,
                         discord.Permissions.FLAGS.READ_MESSAGE_HISTORY
                     ])) {
-                    const pins = await discordCh.messages.fetchPinned();
+                    const pins = await discordCh.fetchPinnedMessages();
                     const notifications = pins.filter(msg => {
                         return msg.author.id === discordClient.user.id && NotificationManager.parseTimestamp(msg).isValid();
                     });
@@ -599,35 +513,8 @@ async function start() {
         }
         const hubState = bridges.getHub(msg.channel.id);
         const description = hubState != null ? `the Nearhub room: ${hubState.shortUrl}` : "a Nearhub room.";
-        try {
-            await msg.channel.send(`@here Hey! You should join ${description}`, { disableEveryone: false });
-            await msg.unpin();
-        } catch (e) {
-            console.error(ts(`Error sending notification in channel ${formatDiscordCh(msg.channel)}:`), e);
-        }
-    });
-
-    // Gets debug event and some rate limit events in the shape of a 429 message (ie. set channel topic)
-    discordClient.on("debug", (...args) => {
-        if (args[0].startsWith("429")) {
-            if (statsdClient != null) {
-                statsdClient.send("discord.error429", 1, "c");
-            }
-        }
-        console.log("Debug: ", ...args);
-    });
-
-    // Gets rate limit events for some (not all) routes (ie. get channel pins)
-    discordClient.on("rateLimit", info => {
-        console.log(`Rate limit hit:`);
-        console.log(`\ttimeout: ${info.timeout}`);
-        console.log(`\tlimit: ${info.limit}`);
-        console.log(`\tmethod: ${info.method}`);
-        console.log(`\tpath: ${info.path}`);
-        console.log(`\troute: ${info.route}`);
-        if (statsdClient != null) {
-            statsdClient.send("discord.rateLimit", 1, "c");
-        }
+        await msg.channel.send(`@here Hey! You should join ${description}`, { disableEveryone: false });
+        await msg.unpin();
     });
 
     discordClient.on('webhookUpdate', (discordCh) => {
@@ -644,7 +531,6 @@ async function start() {
                     } else if (newWebhook != null && (oldWebhook == null || newWebhook.id !== oldWebhook.id)) {
                         await discordCh.send(`The webhook "${newWebhook.name}" (${newWebhook.id}) will now be used for bridging chat in Nearhub.`);
                     }
-                    // eslint-disable-next-line require-atomic-updates
                     ACTIVE_WEBHOOKS[discordCh.id] = newWebhook;
                 } catch (e) {
                     if (!(e instanceof discord.DiscordAPIError)) { // if we don't have webhook looking permissions just ignore
@@ -652,7 +538,7 @@ async function start() {
                     }
                 }
             }
-        }, discordCh.id);
+        });
     });
 
     discordClient.on('channelUpdate', (oldChannel, newChannel) => {
@@ -661,7 +547,7 @@ async function start() {
             const { hubUrl: currHubUrl, hubId: currHubId } = topicManager.matchHub(newChannel.topic) || {};
             try {
                 if (prevHub != null && prevHub.id != currHubId) {
-                    console.info(ts(`Nearhub room ${prevHub.id} no longer bridged to ${formatDiscordCh(newChannel)}; leaving.`));
+                    console.info(ts(`Hubs room ${prevHub.id} no longer bridged to ${formatDiscordCh(newChannel)}; leaving.`));
                     bridges.dissociate(prevHub.id, newChannel.id);
                     const bridgedChannels = bridges.getChannels(prevHub.id);
                     if (bridgedChannels.size === 0) {
@@ -676,7 +562,6 @@ async function start() {
                 if (currHubId != null && (prevHub == null || prevHub.id != currHubId)) {
                     let currHub = connectedHubs[currHubId];
                     if (currHub == null) {
-                        // eslint-disable-next-line require-atomic-updates
                         currHub = connectedHubs[currHubId] = await connectToHub(reticulumClient, [newChannel], currHubUrl.host, currHubId);
                         await establishBridging(currHub, bridges);
                         bridges.associate(currHub, newChannel);
@@ -686,7 +571,7 @@ async function start() {
                         currHub.reticulumCh.updateProfile(serializeProfile("Nearhub Bot", Array.from(bridgedChannels.values())));
                     }
                     ACTIVE_WEBHOOKS[newChannel.id] = await tryGetOrCreateWebhook(newChannel);
-                    console.info(ts(`Hubs room ${currHubId} bridged to ${formatDiscordCh(newChannel)}.`));
+                    console.info(ts(`Nearhub room ${currHubId} bridged to ${formatDiscordCh(newChannel)}.`));
                     await newChannel.send(`<#${newChannel.id}> bridged to ${currHubUrl}.`);
                 }
             } catch (e) {
@@ -694,24 +579,27 @@ async function start() {
                 const currHubDesc = currHubId != null ? currHubId : "nowhere";
                 console.error(ts(`Failed to update ${formatDiscordCh(newChannel)} bridge from ${prevHubDesc} to ${currHubDesc}:`), e);
             }
-        }, oldChannel.id);
+        });
     });
 
-    const HELP_PREFIX = "Hi! I'm the Nearhub bot. I connect Discord channels with rooms on Nearhub (<https://nearhub.online/>). Type `!hubs help` for more information.";
+    const HELP_PREFIX = "Hi! I'm the Nearhub bot. I connect Discord channels with rooms on Nearhub (<https://nearverse.club/>). Type `!hubs help` for more information.";
 
     const COMMAND_HELP_TEXT =
         "Command reference:\n\n" +
-        "🦆 `!hubs` - Shows general information about the Nearhub integration with the current Discord channel.\n" +
-        "🦆 `!hubs help` - Shows this text you're reading right now.\n" +
-        "🦆 `!hubs create` - Creates a default Nearhub room and puts its URL into the channel topic. " +
+        "ðŸ¦† `!hubs` - Shows general information about the Nearhub integration with the current Discord channel.\n" +
+        "ðŸ¦† `!hubs help` - Shows this text you're reading right now.\n" +
+        "ðŸ¦† `!hubs create` - Creates a default Nearhub room and puts its URL into the channel topic. " +
         "Rooms created with `!hubs create` will inherit moderation permissions from this Discord channel and only allow Discord users in this channel to join the room.\n" +
-        "🦆 `!hubs create [environment URL] [name]` - Creates a new room with the given environment and name, and puts its URL into the channel topic. " +
+        "ðŸ¦† `!hubs create [environment URL] [name]` - Creates a new room with the given environment and name, and puts its URL into the channel topic. " +
         "Valid environment URLs include GLTFs, GLBs, and Spoke scene pages.\n" +
-        "🦆 `!hubs stats` - Shows some summary statistics about room usage.\n" +
-        "🦆 `!hubs remove` - Removes the room URL from the topic and stops bridging this Discord channel with Hubs.\n" +
-        "🦆 `!hubs notify set [datetime]` - Sets a one-time notification to notify `@here` to join the room at some future time.\n" +
-        "🦆 `!hubs notify clear` - Removes all pending notifications.\n" +
-        "🦆 `!hubs users` - Lists the users currently in the Hubs room bridged to this channel.\n"
+        "ðŸ¦† `!hubs stats` - Shows some summary statistics about room usage.\n" +
+        "ðŸ¦† `!hubs remove` - Removes the room URL from the topic and stops bridging this Discord channel with Hubs.\n" +
+        "ðŸ¦† `!hubs notify set [datetime]` - Sets a one-time notification to notify @here to join the room at some future time.\n" +
+        "ðŸ¦† `!hubs notify clear` - Removes all pending notifications.\n" +
+        "ðŸ¦† `!hubs users` - Lists the users currently in the Nearhub room bridged to this channel.\n\n" +
+        "See the documentation and source at https://github.com/MozillaReality/hubs-discord-bot for a more detailed reference " +
+        "of bot functionality, including guidelines on what permissions the bot needs, what kinds of bridging the bot can do, " +
+        "and more about how the bot bridges channels to rooms. You can invite the bot to your own server at https://hubs.mozilla.com/discord.";
 
     discordClient.on('message', msg => {
                 const args = msg.content.split(' ');
@@ -784,15 +672,15 @@ async function start() {
                                             const userCount = Object.values(hubState.reticulumCh.getUsers()).length;
                                             return discordCh.send(
                                                     HELP_PREFIX + `.\n\n` +
-                                                    `🦆 <#${discordCh.id}> bridged to Nearhub room "${hubState.name}" (${hubState.id}) at <${hubState.url}>.\n` +
-                                                    `🦆 ${activeWebhook ? `Bridging chat using the webhook "${activeWebhook.name}" (${activeWebhook.id}).` : "No webhook configured. Add a channel webhook to bridge chat to Nearhub."}\n` +
-              `🦆 Connected since ${moment(hubState.ts).format("LLLL z")}.\n` +
-              `🦆 There ${userCount == 1 ? "is 1 user" : `are ${userCount} users`} in the room.`
+                                                    `ðŸ¦† <#${discordCh.id}> bridged to Nearhub room "${hubState.name}" (${hubState.id}) at <${hubState.url}>.\n` +
+                                                    `ðŸ¦† ${activeWebhook ? `Bridging chat using the webhook "${activeWebhook.name}" (${activeWebhook.id}).` : "No webhook configured. Add a channel webhook to bridge chat to Nearhub."}\n` +
+              `ðŸ¦† Connected since ${moment(hubState.ts).format("LLLL z")}.\n` +
+              `ðŸ¦† There ${userCount == 1 ? "is 1 user" : `are ${userCount} users`} in the room.`
           );
         } else {
           return discordCh.send(
             HELP_PREFIX + `.\n\n` +
-              `🦆 This channel isn't bridged to any room on Nearhub. Use \`!hubs create\` to create a room, or add an existing Nearhub room to the topic to bridge it.\n`
+              `ðŸ¦† This channel isn't bridged to any room on Nearhub. Use \`!hubs create\` to create a room, or add an existing Nearhub room to the topic to bridge it.\n`
           );
         }
       }
@@ -832,7 +720,7 @@ async function start() {
         // "!hubs remove" == if a hub is bridged, remove it
         const { hubUrl } = topicManager.matchHub(discordCh.topic) || {};
         if (!hubUrl) {
-          return discordCh.send("No Hubs room is bridged in the topic, so doing nothing :eyes:");
+          return discordCh.send("No Nearhub room is bridged in the topic, so doing nothing :eyes:");
         }
 
         return trySetTopic(discordCh, topicManager.removeHub(discordCh.topic));
@@ -872,7 +760,7 @@ async function start() {
           return discordCh.send(COMMAND_HELP_TEXT);
         }
         if (args.length === 3) { // !hubs notify clear
-          const pins = await discordCh.messages.fetchPinned();
+          const pins = await discordCh.fetchPinnedMessages();
           const notifications = pins.filter(msg => {
             return msg.author.id === discordClient.user.id && NotificationManager.parseTimestamp(msg).isValid();
           });
@@ -895,17 +783,12 @@ async function start() {
           if (await tryPin(discordCh, msg) != null) {
             notificationManager.add(when, msg);
           }
-          return;
         }
       }
 
       case "kill": {
         // todo: probably make this configurable
         const WHITELISTED_USERS = [
-          "339914448032497664", // gfodor
-          "544406895889350676", // elgin
-          "407386567305330688", // liv
-          "146595594155196416" // mqp
         ];
         if (!WHITELISTED_USERS.includes(msg.author.id)) {
           return discordCh.send("You are not powerful enough to kill the bot.");
@@ -916,7 +799,7 @@ async function start() {
 
       }
 
-    }, discordCh.id);
+    });
 
   });
 }
