@@ -582,21 +582,21 @@ async function start() {
         });
     });
 
-    const HELP_PREFIX = "Hi! I'm the Nearhub bot. I connect Discord channels with rooms on Nearhub (<https://nearverse.club/>). Type `!hubs help` for more information.";
+    const HELP_PREFIX = "Hi! I'm the Nearhub bot. I connect Discord channels with rooms on Nearhub (<https://nearverse.club/>). Type `!nearhub help` for more information.";
 
     const COMMAND_HELP_TEXT =
         "Command reference:\n\n" +
-        "ðŸ¦† `!hubs` - Shows general information about the Nearhub integration with the current Discord channel.\n" +
-        "ðŸ¦† `!hubs help` - Shows this text you're reading right now.\n" +
-        "ðŸ¦† `!hubs create` - Creates a default Nearhub room and puts its URL into the channel topic. " +
-        "Rooms created with `!hubs create` will inherit moderation permissions from this Discord channel and only allow Discord users in this channel to join the room.\n" +
-        "ðŸ¦† `!hubs create [environment URL] [name]` - Creates a new room with the given environment and name, and puts its URL into the channel topic. " +
+        "ðŸ¦† `!nearhub` - Shows general information about the Nearhub integration with the current Discord channel.\n" +
+        "ðŸ¦† `!nearhub help` - Shows this text you're reading right now.\n" +
+        "ðŸ¦† `!nearhub create` - Creates a default Nearhub room and puts its URL into the channel topic. " +
+        "Rooms created with `!nearhub create` will inherit moderation permissions from this Discord channel and only allow Discord users in this channel to join the room.\n" +
+        "ðŸ¦† `!nearhub create [environment URL] [name]` - Creates a new room with the given environment and name, and puts its URL into the channel topic. " +
         "Valid environment URLs include GLTFs, GLBs, and Spoke scene pages.\n" +
-        "ðŸ¦† `!hubs stats` - Shows some summary statistics about room usage.\n" +
-        "ðŸ¦† `!hubs remove` - Removes the room URL from the topic and stops bridging this Discord channel with Hubs.\n" +
-        "ðŸ¦† `!hubs notify set [datetime]` - Sets a one-time notification to notify @here to join the room at some future time.\n" +
-        "ðŸ¦† `!hubs notify clear` - Removes all pending notifications.\n" +
-        "ðŸ¦† `!hubs users` - Lists the users currently in the Nearhub room bridged to this channel.\n\n" +
+        "ðŸ¦† `!nearhub stats` - Shows some summary statistics about room usage.\n" +
+        "ðŸ¦† `!nearhub remove` - Removes the room URL from the topic and stops bridging this Discord channel with Hubs.\n" +
+        "ðŸ¦† `!nearhub notify set [datetime]` - Sets a one-time notification to notify @here to join the room at some future time.\n" +
+        "ðŸ¦† `!nearhub notify clear` - Removes all pending notifications.\n" +
+        "ðŸ¦† `!nearhub users` - Lists the users currently in the Nearhub room bridged to this channel.\n\n" +
         "See the documentation and source at https://github.com/MozillaReality/hubs-discord-bot for a more detailed reference " +
         "of bot functionality, including guidelines on what permissions the bot needs, what kinds of bridging the bot can do, " +
         "and more about how the bot bridges channels to rooms. You can invite the bot to your own server at https://hubs.mozilla.com/discord.";
@@ -606,7 +606,7 @@ async function start() {
                 const discordCh = msg.channel;
 
                 // early & cheap bailout if this message isn't a bot command and isn't in a bridged channel
-                if (args[0] !== "!hubs" && bridges.getHub(discordCh.id) == null) {
+                if (args[0] !== "!nearhub" && bridges.getHub(discordCh.id) == null) {
                     return;
                 }
 
@@ -632,13 +632,13 @@ async function start() {
                             if (!discordCh.guild) { // e.g. you DMed the bot
                                 return discordCh.send(HELP_PREFIX + "\n\n" +
                                     "I only work in public channels. Find a channel that you want to be bridged to a Nearhub room and talk to me there.\n\n" +
-                                    "If you're curious about what I do, try `!hubs help` or check out https://github.com/MozillaReality/hubs-discord-bot."
+                                    "If you're curious about what I do, try `!nearhub help` or check out https://github.com/MozillaReality/hubs-discord-bot."
                                 );
                             }
 
                             // echo normal chat messages into the hub, if we're bridged to a hub
                             const hubState = bridges.getHub(discordCh.id);
-                            if (args[0] !== "!hubs") {
+                            if (args[0] !== "!nearhub") {
                                 if (hubState == null) {
                                     return;
                                 }
@@ -667,7 +667,7 @@ async function start() {
 
                                 case undefined:
                                     {
-                                        // "!hubs" == emit useful info about the current bot and hub state
+                                        // "!nearhub" == emit useful info about the current bot and hub state
                                         if (hubState != null) {
                                             const userCount = Object.values(hubState.reticulumCh.getUsers()).length;
                                             return discordCh.send(
@@ -680,13 +680,13 @@ async function start() {
         } else {
           return discordCh.send(
             HELP_PREFIX + `.\n\n` +
-              `ðŸ¦† This channel isn't bridged to any room on Nearhub. Use \`!hubs create\` to create a room, or add an existing Nearhub room to the topic to bridge it.\n`
+              `ðŸ¦† This channel isn't bridged to any room on Nearhub. Use \`!nearhub create\` to create a room, or add an existing Nearhub room to the topic to bridge it.\n`
           );
         }
       }
 
       case "help": {
-        // !hubs help == bot command reference
+        // !nearhub help == bot command reference
         return discordCh.send(COMMAND_HELP_TEXT);
       }
 
@@ -700,13 +700,13 @@ async function start() {
         const { sceneId } = topicManager.matchScene(url) || {};
         const name = args.length > 3 ? args[3] : getChannelBaseName(discordCh.name);
         const guildId = discordCh.guild.id;
-        if (sceneId) { // !hubs create [scene URL] [name]
+        if (sceneId) { // !nearhub create [scene URL] [name]
           const { url: hubUrl, hub_id: hubId } = await reticulumClient.createHubFromScene(name, sceneId);
           const updatedTopic = topicManager.addHub(discordCh.topic, hubUrl);
           if (await trySetTopic(discordCh, updatedTopic) != null) {
             return reticulumClient.bindHub(hubId, guildId, discordCh.id);
           }
-        } else { // !hubs create [environment URL] [name]
+        } else { // !nearhub create [environment URL] [name]
           const { url: hubUrl, hub_id: hubId } = await reticulumClient.createHubFromUrl(name, url);
           const updatedTopic = topicManager.addHub(discordCh.topic, hubUrl);
           if (await trySetTopic(discordCh, updatedTopic) != null) {
@@ -717,7 +717,7 @@ async function start() {
       }
 
       case "remove": {
-        // "!hubs remove" == if a hub is bridged, remove it
+        // "!nearhub remove" == if a hub is bridged, remove it
         const { hubUrl } = topicManager.matchHub(discordCh.topic) || {};
         if (!hubUrl) {
           return discordCh.send("No Nearhub room is bridged in the topic, so doing nothing :eyes:");
@@ -727,7 +727,7 @@ async function start() {
       }
 
       case "users": {
-        // "!hubs users" == list users
+        // "!nearhub users" == list users
         if (hubState != null) {
           const names = Object.values(hubState.reticulumCh.getUsers()).map(info => info.metas[0].profile.displayName);
           if (names.length) {
@@ -741,7 +741,7 @@ async function start() {
       }
 
       case "stats": {
-        // "!hubs stats" == stats for the current hub
+        // "!nearhub stats" == stats for the current hub
         if (hubState != null) {
           return discordCh.send(formatStats(hubState.stats.summarize(), hubState.url));
         } else {
@@ -759,7 +759,7 @@ async function start() {
         if (args.length >= 4 && args[2] !== "set") {
           return discordCh.send(COMMAND_HELP_TEXT);
         }
-        if (args.length === 3) { // !hubs notify clear
+        if (args.length === 3) { // !nearhub notify clear
           const pins = await discordCh.fetchPinnedMessages();
           const notifications = pins.filter(msg => {
             return msg.author.id === discordClient.user.id && NotificationManager.parseTimestamp(msg).isValid();
@@ -773,7 +773,7 @@ async function start() {
             }
             return discordCh.send(`Removed ${notifications.size} scheduled notification(s).`);
           }
-        } else { // !hubs notify set [date/time descriptor]
+        } else { // !nearhub notify set [date/time descriptor]
           const descriptor = args.slice(3).join(" ");
           const when = moment(descriptor);
           if (!when.isValid()) {
